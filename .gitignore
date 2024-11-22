@@ -32,4 +32,11 @@ launch.json
 .vscode/
 *.swp
 *.swo
-.DS_Store 
+.DS_Store
+
+# Misc
+*.pdf
+*.docx
+*.doc
+*.xls
+*.xlsx
