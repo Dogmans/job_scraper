@@ -1,13 +1,12 @@
 import logging
+from datetime import datetime, timedelta
 from huggingface_hub import InferenceClient
-from linkedin_jobs_scraper import LinkedinScraper
-from linkedin_jobs_scraper.events import Events
-from linkedin_jobs_scraper.filters import OnSiteOrRemoteFilters, SalaryBaseFilters, TimeFilters, RelevanceFilters
-from linkedin_jobs_scraper.query import Query, QueryOptions, QueryFilters
 import faiss
 import numpy as np
 from PyPDF2 import PdfReader
 import os
+import requests
+from typing import List, Dict
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -76,14 +75,14 @@ def extract_title_and_skills(cv_text):
     print("Starting job title and skills extraction...")
     prompt = """
     Task: From the CV text below, extract:
-    1. 5 generic job titles that best match the person's experience (most recent experience is most important, job title only excluding company etc.)
-    2. A list of technical skills and programming languages (maximum 10 most important ones)
+    1. 5 generic job titles that best match the person's experience (most recent experience is most important)
+    2. A list of technical skills and programming languages (maximum 10 most important ones, based on frequency in document and recency)
     
     Format your response exactly like this:
     TITLES: [job title 1], [job title 2], [job title 3], [job title 4], [job title 5]
     SKILLS: [skill1], [skill2], [skill3], ...
     
-    Note: Focus on the most recent experience when generating titles.
+    Note: Focus on the most recent experience when generating titles. Titles should be specific and reflect actual job roles.
     
     CV Text:
     """ + cv_text
@@ -106,16 +105,62 @@ def extract_title_and_skills(cv_text):
     
     return job_titles, skills
 
-def add_job(data):
-    url = data.link.split("?")[0]
-    if url not in seen_urls:
-        seen_urls.add(url)
-        jobs.append({
-            'title': data.title,
-            'company': data.company,
-            'description': data.description,
-            'link': data.link
-        })
+def search_jobs(job_titles: List[str], skills: List[str], api_key: str) -> List[Dict]:
+    """Search jobs using APIJobs API"""
+    url = "https://api.apijobs.dev/v1/job/search"
+    headers = {
+        "apikey": api_key,
+        "Content-Type": "application/json"
+    }
+    
+    # Combine job titles and skills into search query
+    titles_query = " OR ".join(job_titles)
+    skills_query = " OR ".join(skills[:3])
+    search_query = f"({titles_query}) AND ({skills_query})"
+    
+    # Get date x days ago for published_since
+    days_ago = str((datetime.now() - timedelta(days=14)).date())
+    
+    payload = {
+        "q": search_query,
+        # "employment_type": "Full Time",
+        "country": "United Kingdom",
+        "published_since": days_ago,
+        # "domains": ["linkedin.com", "indeed.com", "reed.co.uk"],  # Uncomment if you want to filter by specific job boards
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        return response.json()['hits']  # Changed from ['jobs'] to ['hits']
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching jobs: {e}")
+        return []
+
+def add_job(job_data: Dict) -> Dict:
+    """Convert API job data to our standard format"""
+    return {
+        'title': job_data.get('title', ''),
+        'company': job_data.get('website_name', ''),  # Changed from hiringOrganization.name
+        'description': job_data.get('description', ''),
+        'link': job_data.get('url', ''),  # Changed from just url
+        'location': f"{job_data.get('city', '')}, {job_data.get('country', '')}",  # Combined city and country
+        'posted_date': job_data.get('published_since', ''),
+        'employment_type': job_data.get('employment_type', '')
+    }
+
+def add_job(job_data: Dict) -> Dict:
+    """Convert API job data to our standard format"""
+    return {
+        'title': job_data.get('title', ''),
+        'company': job_data.get('hiringOrganization', {}).get('name', ''),
+        'description': job_data.get('description', ''),
+        'link': job_data.get('url', ''),
+        'salary_range': f"{job_data.get('baseSalary', {}).get('minValue', '')} - {job_data.get('baseSalary', {}).get('maxValue', '')} {job_data.get('baseSalary', {}).get('currency', '')}",
+        'location': job_data.get('location', {}).get('name', ''),
+        'skills': job_data.get('skills', ''),
+        'posted_date': job_data.get('published_since', '')
+    }
 
 def compare_jobs_with_cv(jobs, cv_text):
     cv_embedding = get_embeddings(cv_text)[0]
@@ -126,21 +171,26 @@ def compare_jobs_with_cv(jobs, cv_text):
     index.add(job_embeddings)
     
     # Get distances and indices for top matches
-    D, I = index.search(np.array([cv_embedding]), k=len(jobs))  # Get all matches
+    D, I = index.search(np.array([cv_embedding]), k=len(jobs))
     
     # Convert distances to similarity scores (0-100)
-    # FAISS returns L2 distances, so we need to convert them to similarity scores
-    # Smaller distances = better match, so we invert and normalize
     max_distance = max(D[0])
     similarity_scores = [100 * (1 - (distance / max_distance)) for distance in D[0]]
     
-    # Create list of (job, score) tuples
-    job_matches = [(jobs[i], score) for i, score in zip(I[0], similarity_scores)]
+    # Create list of (job, score) tuples, using job URL as unique identifier
+    seen_urls = set()
+    job_matches = []
+    for i, score in zip(I[0], similarity_scores):
+        job = jobs[i]
+        base_url = job['link'].split('?')[0]
+        if base_url not in seen_urls:
+            seen_urls.add(base_url)
+            job_matches.append((job, score))
     
-    # Sort by score descending (highest score first)
+    # Sort by score descending
     job_matches.sort(key=lambda x: x[1], reverse=True)
     
-    # Take top 5 matches with their scores
+    # Take top 5 matches
     top_matches = job_matches[:5]
     
     # Print scores for transparency
@@ -148,7 +198,6 @@ def compare_jobs_with_cv(jobs, cv_text):
     for job, score in top_matches:
         print(f"{job['title']}: {score:.1f}%")
     
-    # Return jobs with their scores
     return [job for job, score in top_matches]
 
 # Main execution
@@ -158,60 +207,34 @@ if __name__ == "__main__":
     cv_text = parse_cv(cv_path)
     print("CV parsed successfully")
 
-    # Extract job title and generate similar titles
+    # Extract job titles and skills
     job_titles, skills = extract_title_and_skills(cv_text)
-    print(f"Generated similar job titles and skills: {job_titles} and {skills}")
+    print(f"Generated job titles and skills: {job_titles} and {skills}")
 
-    # Generate a LinkedIn query from job keywords
-    linkedin_query = "(" + " OR ".join(job_titles) + ") AND (" + " OR ".join(skills) + ")"
-
-    # Define locations and create query
-    locations = ["United Kingdom"]
-    query_obj = Query(
-        query=linkedin_query,
-        options=QueryOptions(
-            locations=locations,
-            # skip_promoted_jobs=True,
-            filters=QueryFilters(
-                relevance=RelevanceFilters.RECENT,
-                time=TimeFilters.MONTH,
-                base_salary=SalaryBaseFilters.SALARY_80K,
-                on_site_or_remote=[OnSiteOrRemoteFilters.REMOTE, OnSiteOrRemoteFilters.HYBRID],
-            ),
-            limit=54
-        )
-    )
-
-    # Initialize and run the scraper
-    # Initialize and run the scraper with authentication
-    print(os.environ['LI_AT_COOKIE'])
-    jobs = []
-    seen_urls = set()
-    scraper = LinkedinScraper(
-        # Other settings
-        headless=True,
-        max_workers=1,
-        slow_mo=1.0,
-        page_load_timeout=60
-    )
-
-    scraper.on(Events.DATA, add_job)
-    scraper.on(Events.ERROR, lambda error: logging.error(f"LinkedIn scraping error: {error}"))
-    scraper.on(Events.END, lambda: print("LinkedIn scraping completed"))
-
-    print("Starting LinkedIn scraping...")
-    scraper.run(query_obj)
+    # Fetch jobs from APIJobs
+    api_key = os.environ.get('API_KEY')
+    if not api_key:
+        raise ValueError("API_KEY environment variable not set")
+    
+    raw_jobs = search_jobs(job_titles, skills, api_key)
+    jobs = [add_job(job) for job in raw_jobs]
+    print(f"Found {len(jobs)} matching jobs")
 
     # Compare jobs with CV
-    print("Comparing jobs with CV...")
     if not jobs:
         print("No jobs found")
         exit()
+    
     top_jobs = compare_jobs_with_cv(jobs, cv_text)
 
     # Print results
     print("\nTop Job Matches:")
     for i, job in enumerate(top_jobs, 1):
-        print(f"\n{i}. {job['title']} at {job['company']}")
+        print(f"\n{i}. {job['title']}")
+        print(f"Company: {job['company']}")
+        print(f"Location: {job['location']}")
+        print(f"Salary: {job['salary_range']}")
+        print(f"Posted: {job['posted_date']}")
         print(f"Link: {job['link']}")
+        print(f"Required Skills: {job['skills']}")
         print("-" * 50)
