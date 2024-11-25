@@ -7,7 +7,7 @@ $hfToken = Read-Host "Enter your HuggingFace token"
 
 # Set environment variables
 $env:CV_FILE_PATH = $cvPath
-$env:API_KEY = $apiKey
+$env:SERP_API_KEY = $apiKey
 $env:HUGGINGFACE_TOKEN = $hfToken
 
 # Check if virtual environment exists
