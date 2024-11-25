@@ -1,12 +1,16 @@
+# Standard library imports
 import logging
+import os
+import time
 from datetime import datetime, timedelta
-from huggingface_hub import InferenceClient
+from typing import List, Dict
+
+# Third-party imports
 import faiss
+from huggingface_hub import InferenceClient
 import numpy as np
 from PyPDF2 import PdfReader
-import os
 import requests
-from typing import List, Dict
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -106,61 +110,52 @@ def extract_title_and_skills(cv_text):
     return job_titles, skills
 
 def search_jobs(job_titles: List[str], skills: List[str], api_key: str) -> List[Dict]:
-    """Search jobs using APIJobs API"""
-    url = "https://api.apijobs.dev/v1/job/search"
-    headers = {
-        "apikey": api_key,
-        "Content-Type": "application/json"
-    }
+    """Search jobs using SerpAPI's Google Jobs API"""
+    url = "https://serpapi.com/search.json"
+    all_jobs = []
     
     # Combine job titles and skills into search query
-    titles_query = " OR ".join(job_titles)
+    titles_query = " OR ".join(job_titles[:2])
     skills_query = " OR ".join(skills[:3])
     search_query = f"({titles_query}) AND ({skills_query})"
     
-    # Get date x days ago for published_since
-    days_ago = str((datetime.now() - timedelta(days=14)).date())
-    
-    payload = {
+    params = {
+        "api_key": api_key,
+        "engine": "google_jobs",
         "q": search_query,
-        # "employment_type": "Full Time",
-        "country": "United Kingdom",
-        "published_since": days_ago,
-        # "domains": ["linkedin.com", "indeed.com", "reed.co.uk"],  # Uncomment if you want to filter by specific job boards
+        "location": "London",
+        "hl": "en",
+        "gl": "uk",
+        "chips": "date_posted:week"
     }
     
     try:
-        response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        return response.json()['hits']  # Changed from ['jobs'] to ['hits']
+        while True:
+            print(f"Fetching jobs page...")
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            jobs_list = data.get('jobs_results', [])
+            print(f"Found {len(jobs_list)} jobs on this page")
+            
+            for job in jobs_list:
+                all_jobs.append(job)
+            
+            # Check for next page
+            if 'serpapi_pagination' in data and 'next_page_token' in data['serpapi_pagination']:
+                params['next_page_token'] = data['serpapi_pagination']['next_page_token']
+            else:
+                break
+                
+            # Optional: Add delay between requests
+            time.sleep(1)
+            
     except requests.exceptions.RequestException as e:
         print(f"Error fetching jobs: {e}")
-        return []
-
-def add_job(job_data: Dict) -> Dict:
-    """Convert API job data to our standard format"""
-    return {
-        'title': job_data.get('title', ''),
-        'company': job_data.get('website_name', ''),  # Changed from hiringOrganization.name
-        'description': job_data.get('description', ''),
-        'link': job_data.get('url', ''),  # Changed from just url
-        'location': f"{job_data.get('city', '')}, {job_data.get('country', '')}",  # Combined city and country
-        'posted_date': job_data.get('published_since', ''),
-        'employment_type': job_data.get('employment_type', '')
-    }
-
-def add_job(job_data: Dict) -> Dict:
-    """Convert API job data to our standard format"""
-    return {
-        'title': job_data.get('title', ''),
-        'company': job_data.get('hiringOrganization', {}).get('name', ''),
-        'description': job_data.get('description', ''),
-        'link': job_data.get('url', ''),
-        'salary_range': f"{job_data.get('baseSalary', {}).get('minValue', '')} - {job_data.get('baseSalary', {}).get('maxValue', '')} {job_data.get('baseSalary', {}).get('currency', '')}",
-        'location': job_data.get('location', {}).get('name', ''),
-        'skills': job_data.get('skills', ''),
-        'posted_date': job_data.get('published_since', '')
-    }
+    
+    print(f"Found {len(all_jobs)} total jobs")
+    return all_jobs
 
 def compare_jobs_with_cv(jobs, cv_text):
     cv_embedding = get_embeddings(cv_text)[0]
@@ -212,12 +207,11 @@ if __name__ == "__main__":
     print(f"Generated job titles and skills: {job_titles} and {skills}")
 
     # Fetch jobs from APIJobs
-    api_key = os.environ.get('API_KEY')
+    api_key = os.environ.get('SERP_API_KEY')
     if not api_key:
-        raise ValueError("API_KEY environment variable not set")
+        raise ValueError("SERP_API_KEY environment variable not set")
     
-    raw_jobs = search_jobs(job_titles, skills, api_key)
-    jobs = [add_job(job) for job in raw_jobs]
+    jobs = search_jobs(job_titles, skills, api_key)
     print(f"Found {len(jobs)} matching jobs")
 
     # Compare jobs with CV
@@ -230,11 +224,7 @@ if __name__ == "__main__":
     # Print results
     print("\nTop Job Matches:")
     for i, job in enumerate(top_jobs, 1):
-        print(f"\n{i}. {job['title']}")
-        print(f"Company: {job['company']}")
-        print(f"Location: {job['location']}")
-        print(f"Salary: {job['salary_range']}")
-        print(f"Posted: {job['posted_date']}")
-        print(f"Link: {job['link']}")
-        print(f"Required Skills: {job['skills']}")
+        print(f"\n{i}. Job Details:")
+        for key, value in job.items():
+            print(f"{key}: {value}")
         print("-" * 50)
