@@ -177,7 +177,7 @@ def compare_jobs_with_cv(jobs, cv_text):
     job_matches = []
     for i, score in zip(I[0], similarity_scores):
         job = jobs[i]
-        base_url = job['link'].split('?')[0]
+        base_url = job['apply_options'][0]['link'].split('?')[0]
         if base_url not in seen_urls:
             seen_urls.add(base_url)
             job_matches.append((job, score))
