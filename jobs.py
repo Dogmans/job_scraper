@@ -76,16 +76,15 @@ def parse_cv(file_path):
         logging.error(f"Error parsing CV: {str(e)}")
         raise
 
-def extract_title_and_skills(cv_text):
-    print("Starting job title and skills extraction...")
+def extract_title(cv_text):
+    print("Starting job title extraction...")
     prompt = """
     Task: From the CV text below, extract:
-    1. 5 generic job titles that best match the person's experience (most recent experience is most important)
-    2. A list of technical skills and programming languages (maximum 10 most important ones, based on frequency in document and recency)
-    
-    Format your response exactly like this:
-    TITLES: [job title 1], [job title 2], [job title 3], [job title 4], [job title 5]
-    SKILLS: [skill1], [skill2], [skill3], ...
+    job titles 1-5: generic job titles that best match the person's experience (most recent experience is most important)
+    job title 6: the most generic and broad as possible
+
+    Format your response exactly like this, without punctuation, where job title 6 is the most generic one:
+    TITLES: [job title 1], [job title 2], [job title 3], [job title 4], [job title 5], [job title 6]
     
     Note: Focus on the most recent experience when generating titles. Titles should be specific and reflect actual job roles.
     
@@ -95,38 +94,31 @@ def extract_title_and_skills(cv_text):
     response = generate_with_progress(prompt, max_new_tokens=200, task_name="job titles and skills")
     
     # Parse the response
+    response = re.sub("\\..*", "", response)  # Remove any trailing text after a period
     lines = response.strip().split('\n')
     job_titles = []
-    skills = []
     
     for line in lines:
         if "TITLES:" in line:
             job_titles = [title.strip() for title in line.replace("TITLES:", "").split(",")]
-        elif "SKILLS:" in line:
-            skills = [skill.strip() for skill in line.replace("SKILLS:", "").split(",")]
     
     print(f"Extracted job titles: {', '.join(job_titles)}")
-    print(f"Extracted skills: {', '.join(skills)}")
     
-    return job_titles, skills
+    return set(job_titles)
 
-def search_jobs(job_titles: List[str], skills: List[str], api_key: str) -> List[Dict]:
+def search_jobs(job_titles: List[str], api_key: str) -> List[Dict]:
     """Search jobs using SerpAPI's Google Jobs API"""
     url = "https://serpapi.com/search.json"
     all_jobs = []
     
-    # Combine job titles and skills into search query
-    # HACK
-    job_titles = ["(Senior Developer AND startup)", "(Developer AND startup)"]
-    titles_query = " OR ".join(job_titles)
-    skills_query = " OR ".join(skills[:3])
-    search_query = f"startup AND ({titles_query}) AND ({skills_query})"
-    
+    # Combine job titles into search query
+    # search_query = " OR ".join(job_titles)
+    search_query = "developer"
     params = {
         "api_key": api_key,
         "engine": "google_jobs",
         "q": search_query,
-        "location": "London",
+        "location": "London, United Kingdom",
         "hl": "en",
         "gl": "uk",
         "chips": "date_posted:week"
@@ -186,8 +178,8 @@ def compare_jobs_with_cv(jobs, cv_text, count=5):
         response = generate_with_progress(prompt, max_new_tokens=10, task_name="scoring job match")
         
         try:
-            score = int(re.findall("[0-9]{2}[0-9]?", response)[0])
-        except ValueError:
+            score = int(re.findall("\\d{1,3}", response)[0])
+        except:
             score = 0  # Default to 0 if parsing fails
         
         job_matches.append((job, score))
@@ -213,15 +205,15 @@ if __name__ == "__main__":
     print("CV parsed successfully")
 
     # Extract job titles and skills
-    job_titles, skills = extract_title_and_skills(cv_text)
-    print(f"Generated job titles and skills: {job_titles} and {skills}")
+    job_titles = extract_title(cv_text)
+    print(f"Generated job titles: {job_titles}")
 
     # Fetch jobs from APIJobs
     api_key = os.environ.get('SERP_API_KEY')
     if not api_key:
         raise ValueError("SERP_API_KEY environment variable not set")
     
-    jobs = search_jobs(job_titles, skills, api_key)
+    jobs = search_jobs(job_titles, api_key)
     print(f"Found {len(jobs)} matching jobs")
 
     # Compare jobs with CV
