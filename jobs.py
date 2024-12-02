@@ -4,6 +4,7 @@ import os
 import time
 from datetime import datetime, timedelta
 from typing import List, Dict
+import re
 
 # Third-party imports
 import faiss
@@ -115,9 +116,11 @@ def search_jobs(job_titles: List[str], skills: List[str], api_key: str) -> List[
     all_jobs = []
     
     # Combine job titles and skills into search query
-    titles_query = " OR ".join(job_titles[:2])
+    # HACK
+    job_titles = ["(Senior Developer AND startup)", "(Developer AND startup)"]
+    titles_query = " OR ".join(job_titles)
     skills_query = " OR ".join(skills[:3])
-    search_query = f"({titles_query}) AND ({skills_query})"
+    search_query = f"startup AND ({titles_query}) AND ({skills_query})"
     
     params = {
         "api_key": api_key,
@@ -157,36 +160,43 @@ def search_jobs(job_titles: List[str], skills: List[str], api_key: str) -> List[
     print(f"Found {len(all_jobs)} total jobs")
     return all_jobs
 
-def compare_jobs_with_cv(jobs, cv_text):
-    cv_embedding = get_embeddings(cv_text)[0]
-    job_descriptions = [job['description'] for job in jobs]
-    job_embeddings = get_embeddings(job_descriptions)
-
-    index.reset()
-    index.add(job_embeddings)
+def compare_jobs_with_cv(jobs, cv_text, count=5):
+    print("Comparing jobs with CV using LLM...", end=" ", flush=True)
     
-    # Get distances and indices for top matches
-    D, I = index.search(np.array([cv_embedding]), k=len(jobs))
-    
-    # Convert distances to similarity scores (0-100)
-    max_distance = max(D[0])
-    similarity_scores = [100 * (1 - (distance / max_distance)) for distance in D[0]]
-    
-    # Create list of (job, score) tuples, using job URL as unique identifier
-    seen_urls = set()
     job_matches = []
-    for i, score in zip(I[0], similarity_scores):
-        job = jobs[i]
-        base_url = job['apply_options'][0]['link'].split('?')[0]
-        if base_url not in seen_urls:
-            seen_urls.add(base_url)
-            job_matches.append((job, score))
+    
+    for job in jobs:
+        job_description = job['description']
+        
+        # Create a prompt for the LLM to score the CV against the job description
+        prompt = f"""
+        Evaluate the suitability of the following CV for the job described below. Provide a score from 0 to 100, where 100 indicates a perfect match.
+        In your response return the score only as an integer.
+
+        CV Text:
+        {cv_text}
+        
+        Job Description:
+        {job_description}
+        
+        Score:
+        """
+        
+        # Generate the score using the LLM
+        response = generate_with_progress(prompt, max_new_tokens=10, task_name="scoring job match")
+        
+        try:
+            score = int(re.findall("[0-9]{2}[0-9]?", response)[0])
+        except ValueError:
+            score = 0  # Default to 0 if parsing fails
+        
+        job_matches.append((job, score))
     
     # Sort by score descending
     job_matches.sort(key=lambda x: x[1], reverse=True)
     
-    # Take top 5 matches
-    top_matches = job_matches[:5]
+    # Take top matches
+    top_matches = job_matches[:count]
     
     # Print scores for transparency
     print("\nMatch Scores:")
@@ -219,12 +229,13 @@ if __name__ == "__main__":
         print("No jobs found")
         exit()
     
-    top_jobs = compare_jobs_with_cv(jobs, cv_text)
+    top_jobs = compare_jobs_with_cv(jobs, cv_text, 10)
 
     # Print results
     print("\nTop Job Matches:")
     for i, job in enumerate(top_jobs, 1):
         print(f"\n{i}. Job Details:")
         for key, value in job.items():
-            print(f"{key}: {value}")
+            if len(value) < 100:  # Only print if value is short, i.e. not the full job description
+                print(f"{key}: {value}")
         print("-" * 50)
