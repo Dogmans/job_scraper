@@ -7,7 +7,6 @@ from typing import List, Dict
 import re
 
 # Third-party imports
-import faiss
 from huggingface_hub import InferenceClient
 import numpy as np
 from PyPDF2 import PdfReader
@@ -39,10 +38,6 @@ embedding_client = InferenceClient(
     token=os.environ["HUGGINGFACE_TOKEN"]
 )
 
-# Initialize FAISS index
-dimension = 384  # Dimension for sentence-transformers model
-index = faiss.IndexFlatL2(dimension)
-
 def generate_with_progress(prompt, max_new_tokens=100, task_name=""):
     print(f"Generating {task_name}:", end=" ", flush=True)
     response = client.text_generation(
@@ -58,12 +53,6 @@ def generate_with_progress(prompt, max_new_tokens=100, task_name=""):
     print("\nDone!")
     
     return generated_text
-
-def get_embeddings(texts):
-    if isinstance(texts, str):
-        texts = [texts]
-    embeddings = [embedding_client.feature_extraction(text) for text in texts]
-    return np.array(embeddings)
 
 def parse_cv(file_path):
     try:
@@ -111,40 +100,40 @@ def search_jobs(job_titles: List[str], api_key: str) -> List[Dict]:
     url = "https://serpapi.com/search.json"
     all_jobs = []
     
-    # Combine job titles into search query
-    # search_query = " OR ".join(job_titles)
-    search_query = "developer"
-    params = {
-        "api_key": api_key,
-        "engine": "google_jobs",
-        "q": search_query,
-        "location": "London, United Kingdom",
-        "hl": "en",
-        "gl": "uk",
-        "chips": "date_posted:week"
-    }
-    
     try:
-        while True:
-            print(f"Fetching jobs page...")
-            response = requests.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            
-            jobs_list = data.get('jobs_results', [])
-            print(f"Found {len(jobs_list)} jobs on this page")
-            
-            for job in jobs_list:
-                all_jobs.append(job)
-            
-            # Check for next page
-            if 'serpapi_pagination' in data and 'next_page_token' in data['serpapi_pagination']:
-                params['next_page_token'] = data['serpapi_pagination']['next_page_token']
-            else:
-                break
+        for job_title in job_titles:
+            print(f"Searching for jobs with title: {job_title}")
+
+            params = {
+                "api_key": api_key,
+                "engine": "google_jobs",
+                "q": job_title,
+                "location": "London, United Kingdom",
+                "hl": "en",
+                "gl": "uk",
+                "chips": "date_posted:week"
+            }
+
+            while True:
+                print(f"Fetching jobs page...")
+                response = requests.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
                 
-            # Optional: Add delay between requests
-            time.sleep(1)
+                jobs_list = data.get('jobs_results', [])
+                print(f"Found {len(jobs_list)} jobs on this page")
+                
+                for job in jobs_list:
+                    all_jobs.append(job)
+                
+                # Check for next page
+                if 'serpapi_pagination' in data and 'next_page_token' in data['serpapi_pagination']:
+                    params['next_page_token'] = data['serpapi_pagination']['next_page_token']
+                else:
+                    break
+                    
+                # Optional: Add delay between requests
+                time.sleep(1)
             
     except requests.exceptions.RequestException as e:
         print(f"Error fetching jobs: {e}")
